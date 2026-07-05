@@ -1,874 +1,439 @@
-# Tut Week 2
+# Tut Week 1
 
-## Coordinating activities
+## Operating Systems Intro
 
 <details>
-<summary>1. What synchronisation mechanism or approach might one take to have one thread wait for another thread to update some state?</summary>
+<summary>1. What are some differences between a processor running in privileged (kernel) mode and user mode? Why are the two modes needed?</summary>
 
-> Semaphore style answer (semaphore updated, with count initialised a 0)
-
-```c
-wait_for_update()
-{
-   P(updated)
-}
-
-signal_update_occurred()
-{
-   V(updated)
-}
-```
-
-> CV style answer with a variable flag = 0, a lock l, and a CV cv updated
-
-```c
-wait_for_update()
-{
-  lock_acquire(l)
-  while(flag == 0)
-    cv_wait(cv,l)
-  lock_release(l)
-}
-
-signal_update_occurred()
-{
-lock_acquire(l)
-  flag = 1
-  cv_signal(cv,l)
-lock_release(l)
-}
-```
+> We need the 2 modes to make sure that user-level applications can't bypass or take control of the OS (or other applications).
+>
+> Kernel mode allows:
+> - Access to all CPU instructions
+> - Direct access to hardware (disk, I/O, etc)
+> - Access to all address spaces (including the kernel's own)
 
 </details>
 
 <details>
-<summary>2. A particular abstraction only allows a maximum of 10 threads to enter the "room" at any point in time. Further threads attempting to enter the room have to wait at the door for another thread to exit the room. How could one implement a synchronisation approach to enforce the above restriction?</summary>
+<summary>2. What are the two main roles of an Operating System?</summary>
 
-> Semaphore style answer (semaphore room, with count initialised to 10)
-
-```c
-enter_room()
-{
-   P(room);
-}
-
-leave_room()
-{
-   V(room);
-}
-```
-
-> CV style answer with a variable occupants = 0, a lock room_lock, and a CV room_cv updated
-
-```c
-enter_room()
-{
-  lock_acquire(room_lock);
-  while(occupants == 10)
-    cv_wait(room_cv,room_lock);
-  occupants = occupants + 1;
-  lock_release(room_lock);
-}
-
-leave_room()
-{
-  lock_acquire(room_lock);
-    occupants = occupants - 1;
-    if (occupants == 9) 
-      cv_signal(room_cv,room_lock);
-  lock_release(room_lock);
-}
-```
+> 1. Provide an abstraction of the hardware to users
+> 2. To divide/manage resources between multiple competing processes
 
 </details>
 
 <details>
-<summary>3. Multiple threads are waiting for the same thing to happen (e.g. a disk block to arrive from disk). Write pseudo-code for a synchronising and waking the multiple threads waiting for the same event.</summary>
+<summary>3. How does a file system fulfill the two roles of an operating system?</summary>
 
-> A semaphore style answer with a variable waiters_count = 0, disk_block_status = NOT_READY, a semaphore block_mutex initialised to 1, and block_sem initialised to 0.
+> 1. Provide an abstraction of the hardware to users: the filesystem is just a wrapper to how files are stored on the disk.
+> 2. To divide/manage resources between multiple competing processes: the filesystem needs to manage storage (a limited resource) between different competing processes while also enforcing limiting mechanisms, such as quotas.
+
+</details>
+
+<details>
+<summary>4. Which of these should only be allowed in kernel mode?</summary>
+
+> - disable interrupts
+> - read time of day clock
+> - set time of day clock
+> - change memory map
+> - write to disk controller register
+> - Trigger the write of all buffered blocks associated with a file back to disk (fsync).
+
+</details>
+
+## OS System Call Interface
+
+**5.** The following code uses typical UNIX process management system calls: `fork()`, `execl()`, `exit()` and `getpid()`.
 
 ```c
-wait_block()
+#include <sys/types.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#define FORK_DEPTH 3
+
+main()
 {
-  P(block_mutex);
-  if (disk_block_status == READY) {
-    V(block_sem);
-  } else {
-    waiters_count = waiters_count + 1;
+  int i, r;
+  pid_t my_pid;
+
+  my_pid = getpid();
+
+  for (i = 1; i <= FORK_DEPTH; i++) {
+
+    r = fork();
+
+    if (r > 0) {
+      /* we're in the parent process after
+         successfully forking a child */
+
+      printf("Parent process %d forked child process %d\n", my_pid, r);
+
+    } else if (r == 0) {
+
+      /* We're in the child process, so update my_pid */
+      my_pid = getpid();
+
+      /* run /bin/echo if we are at maximum depth, otherwise continue loop */
+      if (i == FORK_DEPTH) {
+        r = execl("/bin/echo", "/bin/echo", "Hello World", NULL);
+
+        /* we never expect to get here, just bail out */
+        exit(1);
+      }
+    } else { /* r < 0 */
+      /* Eek, not expecting to fail, just bail ungracefully */
+      exit(1);
+    }
   }
-  V(block_mutex);
-  P(block_sem);
-}
-
-make_block_ready()
-{
-  P(block_mutex);
-    disk_block_status = READY;
-    while(waiters_count != 0) {
-      waiters_count = waiters_count -1;
-      V(block_sem);
-    }
-      V(block_mutex);
-}
-```
-
-> CV style answer with a variable disk_block_status = NOT_READY, a lock block_lock, and a CV block_cv updated
-
-```c
-wait_block()
-{
-  lock_acquire(block_lock);
-  while(disk_block_status != READY)
-    cv_wait(block_cv,block_lock);
-  lock_release(room_lock);
-}
-
-make_block_ready()
-{
-  lock_acquire(block_lock);
-  disk_block_status = READY;
-  cv_broadcast(block_cv,block_lock);
-  lock_release(block_lock);
-}
-```
-
-</details>
-
-## Identify Deadlocks
-
-**4.** Here are code samples for two threads that use semaphores (count initialised to 1). Give a sequence of execution and context switches in which these two threads can deadlock.
-
-Propose a change to one or both of them that makes deadlock impossible. What general principle do the original threads violate that causes them to deadlock?
-
-```c
-semaphore *mutex, *data;
- 
-void me() {
-	P(mutex);
-	/* do something */
-	
-	P(data);
-	/* do something else */
-	
-	V(mutex);
-	
-	/* clean up */
-	V(data);
-}
- 
-void you() {
-	P(data)
-	P(mutex);
-	
-	/* do something */
-	
-	V(data);
-	V(mutex);
 }
 ```
 
 <details>
-<summary>Show answer</summary>
+<summary>a. What is the value of i in the parent and child after fork?</summary>
 
-> The numbers inserted on the left indicate an execution order that results in deadlock.
-
-```c
-semaphore *mutex, *data;
- 
-void me() {
-1:	P(mutex);
-	/* do something */
-	
-4:	P(data);
-	/* do something else */
-	
-	V(mutex);
-	
-	/* clean up */
-	V(data);
-}
- 
-void you() {
-2:	P(data)
-3:	P(mutex);
-	
-	/* do something */
-	
-	V(data);
-	V(mutex);
-}
-```
-
-> To prevent deadlock, ensure the semaphores are acquired in the same order.
-
-```c
-semaphore *mutex, *data;
- 
-void me() {
-	P(mutex);
-	/* do something */
-	
-	P(data);
-	/* do something else */
-	
-	V(mutex);
-	
-	/* clean up */
-	V(data);
-}
- 
-void you() {
-	P(mutex);
-	P(data)
-	
-	/* do something */
-	
-	V(data);
-	V(mutex);
-}
-```
+> The child is a new independent process that is a copy of the parent. i in the child will have whatever the value was in the parent at the point of forking.
 
 </details>
 
-## More Deadlock Identification
+<details>
+<summary>b. What is the value of my_pid in a parent after a child updates it?</summary>
 
-**5.** Here are two more threads. Can they deadlock? If so, give a concurrent execution in which they do and propose a change to one or both that makes them deadlock free.
+> my_pid in a parent is not updated by any action of the child. The child and parent are independent after forking.
+
+</details>
+
+<details>
+<summary>c. What is the process id of /bin/echo?</summary>
+
+> execl replaces the contents of a running process with the specified executable. The process id does not change.
+
+</details>
+
+<details>
+<summary>d. Why is the code after execl not expected to be reached in the normal case?</summary>
+
+> A successful execl results in the current code being replaced. execl does not return if it succeeds, as there is no previous code to return to.
+
+</details>
+
+<details>
+<summary>e. How many times is Hello World printed when FORK_DEPTH is 3?</summary>
+
+> Hello World is printed 4 times if FORK_DEPTH is 3.
+
+</details>
+
+<details>
+<summary>f. How many processes are created when running the code (including the first)?</summary>
+
+> There are 8 processes involved in the execution of the code.
+
+</details>
+
+---
+
+**6.** Look at this code snippet.
 
 ```c
-lock *file1, *file2, *mutex;
- 
-void laurel() {
-	lock_acquire(mutex);
-	/* do something */
-	
-	lock_acquire(file1);
-    	/* write to file 1 */
- 
-	lock_acquire(file2);
-	/* write to file 2 */
- 
-	lock_release(file1);
-	lock_release(mutex);
- 
-	/* do something */
-	
-	lock_acquire(file1);
- 
-	/* read from file 1 */
-	/* write to file 2 */
- 
-	lock_release(file2);
-	lock_release(file1);
-}
- 
-void hardy() {
-    	/* do stuff */
-	
-	lock_acquire(file1);
-	/* read from file 1 */
- 
-	lock_acquire(file2);
-	/* write to file 2 */
-	
-	lock_release(file1);
-	lock_release(file2);
- 
-	lock_acquire(mutex);
-	/* do something */
-	lock_acquire(file1);
-	/* write to file 1 */
-	lock_release(file1);
-	lock_release(mutex);
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+char teststr[] = "The quick brown fox jumps over the lazy dog.\n";
+
+main()
+{
+  int fd;
+  int len;
+  ssize_t r;
+
+  fd = open("testfile", O_WRONLY | O_CREAT, 0600);
+  if (fd < 0) {
+    /* just ungracefully bail out */
+    perror("File open failed");
+    exit(1);
+  }
+
+  len = strlen(teststr);
+  printf("Attempting to write %d bytes\n", len);
+
+  r = write(fd, teststr, len);
+
+  if (r < 0) {
+    perror("File write failed");
+    exit(1);
+  }
+  printf("Wrote %d bytes\n", (int) r);
+
+  close(fd);
 }
 ```
 
 <details>
-<summary>Show answer</summary>
+<summary>a. What does this code do?</summary>
 
-> The way to look for deadlock potential in this example is to record the order of locking for both threads and look for inconsistencies.
+> The code writes a string to a file. It will create a new file if needed (O_CREAT).
+
+</details>
+
+<details>
+<summary>b. In addition to O_WRONLY, what are the other 2 ways to open a file?</summary>
+
+> The other ways of opening a file are read-only (O_RDONLY) and read-write (O_RDWR).
+
+</details>
+
+<details>
+<summary>c. What does open return in fd, and what is it used for?</summary>
+
+> In the case of failure, fd is set to -1 to signify an error. In the case of success, fd is set to a file descriptor (an integer) that becomes a handle to the file. The file descriptor is used in the other file-related system calls to identify the file to operate on.
+
+</details>
+
+---
+
+**7.** The following code is a variation of the previous code that writes twice.
+
+```c
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+char teststr[] = "The quick brown fox jumps over the lazy dog.\n";
+
+main()
+{
+  int fd;
+  int len;
+  ssize_t r;
+  off_t off;
+
+  fd = open("testfile2", O_WRONLY | O_CREAT, 0600);
+  if (fd < 0) {
+    /* just ungracefully bail out */
+    perror("File open failed");
+    exit(1);
+  }
+
+  len = strlen(teststr);
+  printf("Attempting to write %d bytes\n", len);
+
+  r = write(fd, teststr, len);
+
+  if (r < 0) {
+    perror("File write failed");
+    exit(1);
+  }
+  printf("Wrote %d bytes\n", (int) r);
+
+  off = lseek(fd, 5, SEEK_SET);
+  if (off < 0) {
+    perror("File lseek failed");
+    exit(1);
+  }
+
+  r = write(fd, teststr, len);
+
+  if (r < 0) {
+    perror("File write failed");
+    exit(1);
+  }
+  printf("Wrote %d bytes\n", (int) r);
+
+  close(fd);
+}
+```
+
+<details>
+<summary>a. How big is the file (in bytes) after the two writes?</summary>
+
+> 50 bytes. For each open file, the operating system keeps track of the current offset within the file. The current offset is where the next read or write will start from, and is usually at the location just past the end of the previous read or write. So one would expect the file size to be 90 bytes after two 45-byte writes, except for lseek's interference.
+
+</details>
+
+<details>
+<summary>b. What is lseek() doing that affects the final file size?</summary>
+
+> lseek sets the current offset to a specific location in the file. The lseek in the code moves the current offset from 45 bytes (after the initial write) to 5 bytes from the start of the file. The second write begins from offset 5 and writes 45 bytes, giving 50 bytes in total in the file.
+
+</details>
+
+<details>
+<summary>c. What other options are there in addition to SEEK_SET?</summary>
+
+> See the man page for details on SEEK_CUR and SEEK_END.
+
+</details>
+
+---
+
+**8.** Compile either of the previous two code fragments on a UNIX/Linux machine and run `strace ./a.out` and observe the output.
+
+<details>
+<summary>a. What is strace doing?</summary>
+
+> strace prints a trace of all system calls invoked by a process, together with the arguments to the system call. There are a lot of system calls at the beginning of a trace related to dynamically loading code libraries. Towards the end of the trace you will see the system calls you expect to see.
+
+</details>
+
+<details>
+<summary>b. Without modifying the above code to print fd, what is the value of the file descriptor used to write to the open file?</summary>
+
+> 3
+
+</details>
+
+<details>
+<summary>c. printf does not appear in the system call trace. What is appearing in its place? What's happening here?</summary>
+
+> printf is a library function that creates a buffer based on the string specification it is passed. The buffer is then written to the console using write() to file descriptor 1.
+
+</details>
+
+---
+
+**9.** Compile and run the following code.
+
+```c
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <errno.h>
+
+main()
+{
+  int r;
+  r = chdir("..");
+  if (r < 0) {
+    perror("Eek!");
+    exit(1);
+  }
+
+  r = execl("/bin/ls", "/bin/ls", NULL);
+  perror("Double eek!");
+}
+```
+
+<details>
+<summary>a. What does this code do?</summary>
+
+> The code sets the current working directory of the process to be the parent directory (one higher in the directory hierarchy), and then runs ls to list the directory.
+
+</details>
+
+<details>
+<summary>b. After the program runs, the shell's working directory is the same. Why?</summary>
+
+> The shell forks a child process that runs the code. Each process has its own current working directory, so the code above changes the current working directory of the child process; the current working directory of the parent process (the shell) remains the same.
+
+</details>
+
+<details>
+<summary>c. In what directory does /bin/ls run? Why?</summary>
+
+> exec replaces the contents of the child process with ls, not the environment the child process runs in. The current working directory is part of the environment that the OS manages on behalf of every process, so ls runs in the current working directory of the child process.
+
+</details>
+
+---
+
+<details>
+<summary>10. On UNIX, which of the following are considered system calls? Why? (read, printf, memcpy, open, strncpy)</summary>
+
 >
-> laurel: mutex -> file1 -> file2; file2->file1
-> hardy: file1 -> file2; mutex -> file1
+
+</details>
+
+## Processes and Threads
+
+<details>
+<summary>11. In the three-state process model, what do each of the three states signify? What transitions are possible between each of the states, and what causes a process (or thread) to undertake such a transition?</summary>
+
+> The three states are:
+> - Running: process has been scheduled and is running on the CPU
+> - Ready: process is ready to be run but has not yet been dispatched
+> - Blocked: process is waiting for some event to happen before execution
 >
-> Note file1 and file2 can be acquired in two different orders, which can results in deadlock. See the example below for how it can occur.
+> Transitions:
+> - Running to Ready: timeslice expired, yield, or higher priority process becomes ready.
+> - Ready to Running: dispatcher chose the next thread to run.
+> - Running to Blocked: a requested resource (file, disk block, printer, mutex) is unavailable, so the process is blocked waiting for the resource to become available.
+> - Blocked to Ready: a resource has become available, so all processes blocked waiting for the resource now become ready to continue execution.
+
+</details>
+
+<details>
+<summary>12. Given N threads in a uniprocessor system, how many threads can be running at the same point in time? How many can be ready? How many can be blocked?</summary>
+
+> - Running threads = 0 or 1.
+> - Blocked = N − Running − Ready
+> - Ready = N − Running − Blocked
+
+</details>
+
+<details>
+<summary>13. Compare reading a file using a single-threaded vs a multithreaded file server. It takes 15 msec to get a request and process it (block in cache). A disk operation is needed for 1/3 of requests, taking an additional 75 msec during which the thread sleeps. How many requests/sec for single-threaded? Multithreaded?</summary>
+
+> In the single-threaded case, the cache hits take 15 msec and cache misses take 90 msec. The weighted average is 2/3 × 15 + 1/3 × 90. Thus the mean request takes 40 msec and the server can do 25 per second. For a multithreaded server, all the waiting for the disk is overlapped, so every request takes 15 msec, and the server can handle 66 2/3 requests per second.
+
+
+</details>
+
+## Critical Sections
+
+<details>
+<summary>14. The following fragment is a single line of code. How might a race condition occur if executed concurrently by multiple threads? Give an example of an incorrect result computed for x.
 
 ```c
-lock *file1, *file2, *mutex;
- 
-void laurel() {
-1:	lock_acquire(mutex);
-	/* do something */
-	
-2:	lock_acquire(file1);
-    	/* write to file 1 */
- 
-3:	lock_acquire(file2);
-	/* write to file 2 */
- 
-4:	lock_release(file1);
-7:	lock_release(mutex);
- 
-	/* do something */
-	
-8:	lock_acquire(file1);
- 
-	/* read from file 1 */
-	/* write to file 2 */
- 
-	lock_release(file2);
-	lock_release(file1);
-}
- 
-void hardy() {
-    	/* do stuff */
-	
-5:	lock_acquire(file1);
-	/* read from file 1 */
- 
-6:	lock_acquire(file2);
-	/* write to file 2 */
-	
-	lock_release(file1);
-	lock_release(file2);
- 
-	lock_acquire(mutex);
-	/* do something */
-	lock_acquire(file1);
-	/* write to file 1 */
-	lock_release(file1);
-	lock_release(mutex);
-}
+x = x + 1;
 ```
+</summary>
 
-> The way to prevent deadlock is to define a global locking order and ensure all threads adhere to the order. For this example, lets choose mutex -> file1 -> file2. This implies we should adjust laurel. Here are two versions of laurel that result in deadlock freedom (there are others).
+> The single code statement is compiled into multiple machine instructions. The memory location corresponding to x is loaded into a register, incremented, and then stored back to memory. During the interval between the load and store in the first thread, another thread may perform a load, increment, and store; and when control passes back to the first thread, the results of the second are then overwritten. Another outcome would be for the results of the first to be overwritten by the second (as the first thread loads, increments, then the second thread loads, increments, then the first thread stores, then the second thread stores).
+
+</details>
+
+<details>
+<summary>15. The following function is called by multiple threads (potentially concurrently). Identify the critical section(s) that require mutual exclusion. Describe the race condition or why none exists.
 
 ```c
-lock *file1, *file2, *mutex;
- 
-void laurel() {
-	lock_acquire(mutex);
-	/* do something */
-	
-	lock_acquire(file1);
-    	/* write to file 1 */
- 
-	lock_acquire(file2);
-	/* write to file 2 */
- 
-	lock_release(mutex);
- 
-	/* do something */
-	
-	/* read from file 1 */
-	/* write to file 2 */
- 
-	lock_release(file2);
-	lock_release(file1);
+int i;
+
+void foo()
+{
+    int j;
+    /* random stuff */
+    i = i + 1;
+    j = j + 1;
+    /* more random stuff */
 }
 ```
+</summary>
 
-> Or
+> There is no race condition on j, since it is a local variable per thread. However, i is a variable shared between threads. Thus i = i + 1 would form a critical section (assuming no random stuff is dependent on i).
+
+</details>
+
+<details>
+<summary>16. Under what conditions would the following form a critical section?
 
 ```c
-void laurel() {
-	lock_acquire(mutex);
-	/* do something */
-	
-	lock_acquire(file1);
-    	/* write to file 1 */
-	
-	lock_acquire(file2);
-	/* write to file 2 */
- 
-	lock_release(file1);
-	lock_release(mutex);
- 
-	/* do something */
-
-	lock_release(file2);
-	lock_acquire(file1);
-	lock_acquire(file2);
- 
-	/* read from file 1 */
-	/* write to file 2 */
- 
-	lock_release(file2);
-	lock_release(file1);
+void inc_mem(int *iptr)
+{
+    *iptr = *iptr + 1;
 }
 ```
+</summary>
 
-</details>
-
-## Synchronised Lists
-
-**6.** Describe (and give pseudocode for) a synchronised linked list structure based on thread list code in the OS/161 codebase (kern/thread/threadlist.c). You may use semaphores, locks, and condition variables as you see fit. You must describe (a proof is not necessary) why your algorithm will not deadlock.
-
-In a general sense, the interface to the synchronised list is as follows.
-
-```c
-    init(list_t *);
-    add_head(list_t *list, node_t *node);
-    add_tail(list_t *list, node_t *node);
-    remove_head(list_t *list, node_t **node);
-    remove_tail(list_t *list, node_t **node);
-    insert_after(node_t *in_list, node_t *new_node);
-    insert_before(node_t *in_list, node_t *new_node);
-    remove(node_t *in_list);
-```
-
-Make sure you clearly state your assumptions about the constraints on access to such a structure and how you ensure that these constraints are respected.
-
-In addition to a single lock solution, consider a solution involving a lock per node in the list. The instructive cases are insert_after() and insert_before(), and remove()
-
-The thread subsystem in OS/161 uses a linked list of threads to manage some of its state (kern/thread/threadlist.c). This structure is not synchronised. Why not?
-
-<details>
-<summary>Show answer</summary>
-
-> In OS/161, the threadlist is a doubling linked list where all the code is written under the assumption that is executes mutually exclusively, which in practice is ensured by interrupt disabling on the uniprocessor. Hence, there is no synchronisation in the threadlist code itself.
->
-> Writing a synchronised version of the general list management code could be done with a single lock that is acquired for all updates to the list and nodes itself. This would not allow independent updates to separate nodes in the list to proceed in parallel.
->
-> One could use a lock per node in the list in an attempt to enable more parallelism, combined with locking in only one list direction when multiple locks are require for a single update. This is not as simple as it seems, see the sample code for how complex individual locking becomes for some operations. Given the number of locks required, and that operations all start at the head to avoid deadline, fine-grained locking in this case is worse than a single lock as it simply add overhead of more locks to acquire.
-
-```c
-#include 
-#include 
-#include 
-#include "list.h"
-
-bool node_init(node_t *node)
-{
-        struct lock *lock;
-        lock = lock_create("node lock");
-        if (lock == NULL)
-                return false;
-        node->lock = lock;
-        node->next = NULL;
-        node->prev = NULL;
-        return true;
-}
-void node_cleanup(node_t *node)
-{
-        lock_destroy(node->lock);
-}
-
-bool list_init(list_t *list)
-{
-        bool r;
-        r = node_init(&list->head);
-        if (! r)
-                return false;
-        r = node_init(&list->tail);
-        if (! r) {
-                node_cleanup(&list->head);
-                return false;
-        }
-        list->head.next = &list->tail;
-        list->tail.prev = & list->head;
-        return true;
-}
-                
-        
-void list_cleanup(list_t *list)
-{
-        /* TBD */
-        (void) list;
-}
-
-void add_head(list_t *list, node_t *node)
-{
-        insert_after(&list->head, node);
-}
-
-void add_tail(list_t *list, node_t *node)
-{
-        insert_before(list, &list->tail, node);
-}
-
-void insert_after(node_t *in_list, node_t *new_node)
-{
-        /* assumption, in_list is not removed before we successfully
-           insert, this in only true for the head sentinal
-           node */
-        
-        lock_acquire(new_node->lock); /* start new node in the locked state */
-
-        /* acquire in order head -> tail */
-        lock_acquire(in_list->lock);
-        lock_acquire(in_list->next->lock);
-
-        /* now can add */
-        new_node->next = in_list->next;
-        new_node->prev = in_list;
-
-        in_list->next = new_node;
-        new_node->next->prev = new_node;
-
-        lock_release(new_node->next->lock);
-        lock_release(new_node->lock);
-        lock_release(in_list->lock);
-}
-
-
-
-
-static bool hand_over_locking(list_t *list, node_t *target)
-{
-        /* do hand over locking until we find the target */
-        /* Either we find the target and return with target and
-           predecessor locked or we return false if we don't find
-           it */
-
-        node_t *p, *t;
-        
-        p = &list->head;
-        lock_acquire(p->lock);
-
-        t = p->next;
-        lock_acquire(t->lock);
-        while (t != target) {
-                if (t == &list->tail) {
-                        /* can't find target */
-                        lock_release(p->lock);
-                        lock_release(t->lock);
-                        return false;
-                }
-                lock_release(p->lock);
-                p = t;
-                t = t-> next;
-                lock_acquire(t->lock);
-        }
-        return true;
-}
-        
-        
-bool insert_before(list_t *list, node_t *in_list, node_t *new_node)
-{
-        /* assume in_list is not removed before starting, this is only
-         true for the tail sentinel node */
-        
-        bool r;
-        
-        lock_acquire(new_node->lock); /* again start in locked state */
-        
-
-        /* lock acquire in order head -> tail 
-
-           This fragment attempt to avoid hand-over locking by starting at the
-           tail. It accesses prev without holding the lock, so it might change,
-           and thus needs to check it's still prev after both locks are held.
-
-
-           p = in_list->prev;
-           lock_acquire(p->lock);
-           lock_acquire(in_list->lock);
-
-           while (p->next != in_list) {
-                 
-                 a node must have got inserted
-                 prior to getting the lock
-                
-                lock_release(p->lock);
-                lock_release(in_list->lock);
-                p = in_list->prev;
-                lock_acquire(p->lock);
-                lock_acquire(in_list->lock);
-           }
-
-           Yuck, this is livelock-able....  Basically one can't use the
-           prev pointers to lock as we require the current node's lock
-           prior to using prev, but then we can't lock the
-           predecessor due to lock ordering needed to avoid deadlock.
-           
-        */
-
-
-        /* we changed the prototype to include the list and use
-           handover locking to lock in_list and predecessor */
-
-        r = hand_over_locking(list, in_list);
-
-        /* this should always succeed in a system that does not remove
-           in_list */
-        
-        if (!r) {
-                lock_release(new_node->lock);
-                return r;
-        }
-        
-        /* now have locks on prev and in_list */
-
-        /* now can add */
-        new_node->prev = in_list->prev;
-        new_node->next = in_list;
-
-        in_list->prev = new_node;
-        new_node->prev->next = new_node;
-
-        lock_release(new_node->prev->lock);
-        lock_release(new_node->lock);
-        lock_release(in_list->lock);
-        return true;
-}
-
-static void remove_with_locks_held(node_t *in_list)
-{
-        in_list->prev->next = in_list->next;
-        in_list->next->prev = in_list->prev;
-                
-}
-
-void remove_head(list_t *list, node_t **node)
-{
-        node_t *n;
-        lock_acquire(list->head.lock); /* sentinel head */
-        lock_acquire(list->head.next->lock); /* removal candidate */
-        
-        if (list->head.next == &list->tail) {
-                /* nothing to remove */
-                lock_release(list->head.next->lock); 
-                lock_release(list->head.lock); 
-                *node = NULL; /* return null for empty list */
-        }
-                
-        lock_acquire(list->head.next->next->lock); /* relies on lock
-                                                    held above to use
-                                                    the pointer */
-
-        n = list->head.next;
-        
-        remove_with_locks_held(n);
-        
-        lock_release(list->head.lock); /* sentinel head */
-        lock_release(n->lock); /* removed node */
-        lock_release(list->head.next->lock); /* new head */
-
-        *node = n;
-}
-
-void remove_tail(list_t *list, node_t **node)
-{
-        
-/* leave this as an exercise, this is a handover involving three nodes
-   where the last one is the tail */
-
-        (void) list;
-        (void) node;
-}
-
-bool remove(list_t *list, node_t *in_list)
-{
-
-        bool r;
-        
-        r = hand_over_locking(list, in_list);
-
-        /* this should always succeed in a non-broken system,
-           otherwise we have attempts to remove the same node more than
-           once */
-        
-        if (!r)
-                return r;
-
-        /* in_list and predecessor is lock */
-
-        lock_acquire(in_list->next->lock); /* grab the third lock */
-
-        /* we can now remove the node */
-
-        remove_with_locks_held(in_list);
-        
-        lock_release(in_list->prev->lock);
-        lock_release(in_list->next->lock);
-        lock_release(in_list->lock);
-        return true;
-}
-```
-
-</details>
-
-## Concurrency and Deadlock
-
-<details>
-<summary>7. For each of the following scenarios, one or more dining philosophers are going hungry. What is the condition the philosophers are suffering from?
-
-- Each philosopher at the table has picked up his left fork, and is waiting for his right fork
-- Only one philosopher is allowed to eat at a time. When more than one philosophy is hungry, the youngest one goes first. The oldest philosopher never gets to eat.
-- Each philosopher, after picking up his left fork, puts it back down if he can't immediately pick up the right fork to give others a chance to eat. No philosopher is managing to eat despite lots of left fork activity.</summary>
-
-> Deadlock
-> Starvation
-> Livelock
-
-</details>
-
-<details>
-<summary>8. What is starvation, give an example?</summary>
-
-> Starvation is where the system allocates resources according to some policy such that progress is being made, however one or more processes never receive the resources they require as a result of that policy.
->
-> Example, a printer that is allocated based on "smallest print job first" in order to improve the response for small jobs. A large job on a busy system may never print and thus starve
-
-</details>
-
-<details>
-<summary>9. Two processes are attempting to read independent blocks from a disk, which involves issuing a seek command and a read command. Each process is interrupted by the other in between its seek and read. When a process discovers the other process has moved the disk head, it re-issues the original seek to re-position the head for itself, which is again interrupted prior to the read. This alternate seeking continues indefinitely, with neither process able to read their data from disk. Is this deadlock, starvation, or livelock? How would you change the system to prevent the problem?</summary>
-
-> It is livelock. Allow each process to lock the disk and issue both commands together mutually exclusively and then release the lock.
-
-</details>
-
-<details>
-<summary>10. Describe four ways to prevent deadlock by attacking the conditions required for deadlock.</summary>
-
-> Mutual exclusion condition
-> - Make the resource sharable, i.e. allow concurrent access to read-only files. However, in general some resources are not shareable and require mutual exclusion.
->
-> Hold and wait condition
-> - Dictate only a single resource can be held at any time. Not really practical.
-> - Require that all required resource be obtained initially. If a resource is not available, all held resources must be releases before trying again - prone to livelock.
->
-> No preemption condition
-> - Preempt the resource (take it away from the holder). Not always possible.
->
-> Circular wait condition
-> - Order the resources numerically and request them in numerical order.
-
-</details>
-
-**11.** Answer the following questions about the tables.
-
-available
-
-| r1 | r2 | r3 | r4 |
-|----|----|----|----|
-| 2  | 1  | 0  | 0  |
-
-| process | alloc r1 | alloc r2 | alloc r3 | alloc r4 | max r1 | max r2 | max r3 | max r4 | needs r1 | needs r2 | needs r3 | needs r4 |
-|---------|------|------|------|------|------|------|------|------|------|------|------|------|
-| p1 | 0 | 0 | 1 | 2 | 0 | 0 | 1 | 2 |   |   |   |   |
-| p2 | 2 | 0 | 0 | 0 | 2 | 7 | 5 | 0 |   |   |   |   |
-| p3 | 0 | 0 | 3 | 4 | 6 | 6 | 5 | 6 |   |   |   |   |
-| p4 | 2 | 3 | 5 | 4 | 4 | 3 | 5 | 6 |   |   |   |   |
-| p5 | 0 | 3 | 3 | 2 | 0 | 6 | 5 | 2 |   |   |   |   |
-
-<details>
-<summary>Compute what each process still might request and display in the columns labeled "still needs".</summary>
-
-> | process | alloc r1 | alloc r2 | alloc r3 | alloc r4 | max r1 | max r2 | max r3 | max r4 | needs r1 | needs r2 | needs r3 | needs r4 |
-> |---------|------|------|------|------|------|------|------|------|------|------|------|------|
-> | p1 | 0 | 0 | 1 | 2 | 0 | 0 | 1 | 2 | 0 | 0 | 0 | 0 |
-> | p2 | 2 | 0 | 0 | 0 | 2 | 7 | 5 | 0 | 0 | 7 | 5 | 0 |
-> | p3 | 0 | 0 | 3 | 4 | 6 | 6 | 5 | 6 | 6 | 6 | 2 | 2 |
-> | p4 | 2 | 3 | 5 | 4 | 4 | 3 | 5 | 6 | 2 | 0 | 0 | 2 |
-> | p5 | 0 | 3 | 3 | 2 | 0 | 6 | 5 | 2 | 0 | 3 | 2 | 0 |
-
-</details>
-
-<details>
-<summary>Is the system in a safe or unsafe state? Why?</summary>
-
-> Safe, feasible schedule p1,p4,p5,p2,p3
-
-</details>
-
-<details>
-<summary>Is the system deadlocked? Why or why not?</summary>
-
-> No. There are not process remaining after the feasible schedule p1,p4,p5,p2,p3
-
-</details>
-
-<details>
-<summary>Which processes, if any, are or may become deadlocked?</summary>
-
-> None
-
-</details>
-
-Assume a request from p3 arrives for (0,1,0,0)
-
-<details>
-<summary>Can the request be safely granted immediately?</summary>
-
-> No
-
-</details>
-
-<details>
-<summary>In what state (deadlocked, safe, unsafe) would immediately granting the request leave the system?</summary>
-
-> Unsafe
-
-</details>
-
-<details>
-<summary>Which processes, if any, are or may become deadlocked if the request is granted immediately?</summary>
-
-> p2, p3
-
-</details>
-
-**12.** Solve the Dining Philosopher's problem below using locks and a different strategy to the one shown in lectures.
-
-```c
-void take_both_forks(unsigned long phil_num)
-{
-
-/*
- * Take forks ensures mutually exclusive access to two forks
- * associated with the philosopher.
- * 
- * The left fork number = phil_num
- * The right fork number = (phil_num + 1) % NUM_PHILOSPHERS
- */
-
-}
-
-
-
-void release_forks(unsigned long phil_num)
-{
-/*
- * Releases forks releases the mutually exclusive access to the
- * philosophers forks.
- */
-
-}
-```
-
-<details>
-<summary>Show answer</summary>
-
-> The strategy is to use a lock per fork. To avoid deadlock we have to always acquire the lower numbered fork first, including handling the wrap-around case.
-
-```c
-struct lock *fork_locks[NUM_PHILOSOPHERS];
-
-void take_both_forks(unsigned long phil_num)
-{
-    int lower, higher;
-
-    lower = phil_num; /* left fork */
-    higher = (phil_num + 1) % NUM_PHILOSOPHERS; /* right fork */
-
-    if (lower > higher) {
-        /* swap lower/higher to avoid deadlock */
-        lower = higher;
-        higher = phil_num;
-    }
-
-    lock_acquire(fork_locks[lower]);
-    lock_acquire(fork_locks[higher]);
-    
-}
-
-void release_forks(unsigned long phil_num)
-{
-    lock_release(fork_locks[phil_num]);
-    lock_release(fork_locks[(phil_num + 1) % NUM_PHILOSOPHERS]);
-}
-```
+> Whether *iptr = *iptr + 1 forms a critical section depends on the scope of the pointer passed to inc_mem. If the pointer points to a local variable, then there is no race. If the pointer points to a shared global variable there is potential for a race, and thus the increment would become a critical section.
 
 </details>
